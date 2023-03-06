@@ -57,7 +57,7 @@ def typecheck(program: Program) -> Program:
     :return: The program, if it is well-typed
     """
 
-    pass
+    return program
 
 
 ##################################################
@@ -154,14 +154,22 @@ def explicate_control(prog: Program) -> cif.CProgram:
     # Constants => cif.Constant
     # Var => cif.Var
     def ec_atm(e: Expr) -> cif.Atm:
-        pass # TOOD: fill in
+        match e:
+            case Constant(x):
+                return cif.Constant(x)
+            case Var(name):
+                return cif.Var(name)
 
     # ec_expr compiles an expression into a Cif expression
     #
     # Prim(op, args) => cif.Prim(op, new_args)
     # else call ec_atm
     def ec_expr(e: Expr) -> cif.Expr:
-        pass # TODO: fill in
+        match e:
+            case Prim(op, args):
+                return cif.Prim(op, [ec_atm(arg) for arg in args])
+            case _:
+                return ec_atm(e)
 
     # ec_stmt takes a stmt and a continuation, returns a list of Cif statements
     def ec_stmt(s: Stmt, cont: List[cif.Stmt]) -> List[cif.Stmt]:
@@ -171,10 +179,23 @@ def explicate_control(prog: Program) -> cif.CProgram:
                 new_stmt: List[cif.Stmt] = [cif.Assign(x, ec_expr(e))]
                 return new_stmt + cont
     # Print(e) => [cif.Print(ec_expr(e))] + cont
+            case Print(e):
+                new_stmt: List[cif.Stmt] = [cif.Print(e)]
+                return new_stmt + cont
     # If(condition, then_stmts, else_stmts) =>
     # cond_label = create block for cont
     # then_label = create block for ec_stmts(then_stmts, [cif.Goto(cond_label)]
     # else_label = create block for ec_stmts(else_stmts, [cif.Goto(cond_label)]
+            case If(condition, then_stmts, else_stmts):
+                cond_label = create_block(cont)
+                then_label = create_block(ec_stmts(then_stmts, [cif.Goto(cond_label)]))
+                else_label = create_block(ec_stmts(else_stmts, [cif.Goto(cond_label)]))
+                new_stmts = [cif.If(ec_expr(condition), cif.Goto(then_label), cif.Goto(else_label))]
+                return new_stmts + cont
+                # return [cif.Return(ec_expr(e))]
+            case Return(e):
+                new_stmt: List[cif.Stmt] = [cif.Return(e)]
+                return new_stmt
     # return [cif.If(ec_expr(condition), cif.Goto(then_label), cif.Goto(else_label)]
 
     # ec_stmts takes a list of stmts and a continuation, returns a list of Cif statements
@@ -192,6 +213,9 @@ def explicate_control(prog: Program) -> cif.CProgram:
     # call ec_stmts on the statements of the program
     # set basic_blocks['start'] to the result
     # TODO: fill in
+
+    cont = [cif.Return(cif.Constant(0))]
+    basic_blocks['start'] = ec_stmts(prog.stmts, cont)
     return cif.CProgram(basic_blocks)
 
 
@@ -240,15 +264,19 @@ def select_instructions(prog: cif.CProgram) -> x86.X86Program:
                 # these operators use their own instruction: "add" | "sub" | "or" | "and" |
                 if op in op_instructions:
                     return [x86.NamedInstr('movq', [si_atm(atm1), x86.Reg('rax')]),
-                            x86.NamedInstr(???, [si_atm(atm2), x86.Reg('rax')]),
+                            x86.NamedInstr(op_instructions[op], [si_atm(atm2), x86.Reg('rax')]),
                             x86.NamedInstr('movq', [x86.Reg('rax'), x86.Var(x)])]
                 # these operators use cmpq: "eq" | "gt" | "gte" | "lt" | "lte"
                 elif op in cmp_codes:
                     # this is the new case
-                    pass
+                    cmp_op = cmp_codes[op]
+                    return [x86.NamedInstr('cmpq', [si_atm(atm1), si_atm(atm2)]),
+                            x86.Set(cmp_op, x86.ByteReg("al")),
+                            x86.NamedInstr('movzbq', [x86.ByteReg('al'), x86.Var(x)])]
                 elif op == 'not':
                     # do what the exercise says
-                    pass
+                    return [x86.NamedInstr('movq', [si_atm(atm1), x86.Var(x)]),
+                            x86.NamedInstr('xorq', [x86.Immediate(1), x86.Var(x)])]
                 # "not" |
                 return [x86.NamedInstr('movq', [si_atm(atm1), x86.Reg('rax')]),
                         x86.NamedInstr('addq', [si_atm(atm2), x86.Reg('rax')]),
@@ -266,6 +294,8 @@ def select_instructions(prog: cif.CProgram) -> x86.X86Program:
     for label in prog.blocks:
         instrs = si_stmts(prog.blocks[label])
         x86_blocks[label] = instrs
+
+    print(x86_blocks)
     return x86.X86Program(x86_blocks)
 
 
@@ -299,7 +329,7 @@ def allocate_registers(program: x86.X86Program) -> x86.X86Program:
 
     live_after_sets: Dict[str, List[Set[x86.Var]]] = {}
     live_before_sets: Dict[str, Set[x86.Var]] = {}
-    basic_blocks = prog.blocks
+    #basic_blocks = prog.blocks
 
     # --------------------------------------------------
     # utilities
@@ -513,9 +543,13 @@ def patch_instructions(program: x86.X86Program) -> x86.X86Program:
 
     def pi_instr(e: x86.Instr) -> List[x86.Instr]:
         match e:
-            case x86.NamedInstr('cmpq', ...):
-
-                pass
+            case x86.NamedInstr('cmpq', [a1, a2]):
+                return [
+                    x86.NamedInstr('movq', [a1, x86.Reg('rax')]),
+                    x86.NamedInstr('cmpq', [a2, x86.Reg('rax')]),
+                    x86.NamedInstr('sete', [x86.Reg('al')]),
+                    x86.NamedInstr('movzbq', [x86.Reg('al'), a1])
+                ]
             case x86.NamedInstr('movq', [x86.Deref(_, _), x86.Deref(_, _)]):
                 return [x86.NamedInstr('movq', [e.args[0], x86.Reg('rax')]),
                         x86.NamedInstr('movq', [x86.Reg('rax'), e.args[1]])]
