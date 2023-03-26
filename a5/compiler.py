@@ -122,6 +122,11 @@ def typecheck(program: Program) -> Program:
                     assert t_e == env[x]
                 else:
                     env[x] = t_e
+            case While(cond, body_stmts):
+                assert tc_exp(cond, env) == bool
+
+                for s in body_stmts:
+                    tc_stmt(s, env)
             case _:
                 raise Exception('tc_stmt', s)
 
@@ -168,9 +173,17 @@ def rco(prog: Program) -> Program:
                           new_then_stmts,
                           new_else_stmts)
             case While(cond, body_stmts):
-                # TODO: fix this so the bindings go in a Begin expression
-                new_cond = rco_exp(cond, bindings)
-                new_stmts = rco_stmts()
+                # Create new bindings for temp variables in condition
+                cond_bindings = {}
+                new_cond = rco_exp(cond, cond_bindings)
+
+                assign_stmts = [Assign(k, v) for k, v in cond_bindings.items()]
+                assign_stmts.append(new_cond)
+
+                new_stmts = Begin(assign_stmts, cond)
+                new_body_stmts = rco_stmts(body_stmts)
+
+                return While(new_stmts, new_body_stmts)
             case _:
                 raise Exception('rco_stmt', stmt)
 
@@ -202,7 +215,6 @@ def rco(prog: Program) -> Program:
                 return Var(new_v)
             case _:
                 raise Exception('rco_exp', e)
-
     return Program(rco_stmts(prog.stmts))
 
 
@@ -267,12 +279,23 @@ def explicate_control(prog: Program) -> cif.CProgram:
                 return [cif.If(explicate_exp(condition),
                                cif.Goto(e2_label),
                                cif.Goto(e3_label))]
+            case While(Begin(cond_stmts, cond_exp), body_stmts):
+                cont_label = create_block(cont)
+                test_label = gensym('loop_label')
+                body_label = create_block(explicate_stmts(body_stmts, [cif.Goto(test_label)]))
 
+                # create the test expression
+                test_cont = [cif.If(explicate_exp(cond_exp), cif.Goto(body_label), cif.Goto(cont_label))]
+                test_block = explicate_stmts(cond_stmts, test_cont)
+                basic_blocks[test_label] = test_block
+
+                return [cif.Goto(test_label)]
             case _:
                 raise RuntimeError(stmt)
 
     def explicate_stmts(stmts: List[Stmt], cont: List[cif.Stmt]) -> List[cif.Stmt]:
         for s in reversed(stmts):
+            print(s)
             cont = explicate_stmt(s, cont)
         return cont
 
@@ -280,6 +303,7 @@ def explicate_control(prog: Program) -> cif.CProgram:
     new_body = explicate_stmts(prog.stmts, new_body)
 
     basic_blocks['start'] = new_body
+    print(cif.CProgram(basic_blocks))
     return cif.CProgram(basic_blocks)
 
 
