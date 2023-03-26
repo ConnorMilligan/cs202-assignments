@@ -284,8 +284,11 @@ def select_instructions(prog: cif.CProgram) -> x86.X86Program:
             case cif.Assign(x, atm1):
                 return [x86.NamedInstr('movq', [si_atm(atm1), x86.Var(x)])]
             case cif.Print(atm1):
-                return [x86.NamedInstr('movq', [si_atm(atm1), x86.Reg('rdi')]),
+                return [x86.NamedInstr('movq', [atm1, x86.Reg('rdi')]),
                         x86.Callq('print_int')]
+            case cif.Return(x):
+                return [x86.NamedInstr('movq', [x86.ByteReg("al"), x86.Reg('rax')]),
+                        x86.Jmp('conclusion')]
             case _:
                 raise Exception('si_stmt', stmt)
 
@@ -295,7 +298,6 @@ def select_instructions(prog: cif.CProgram) -> x86.X86Program:
         instrs = si_stmts(prog.blocks[label])
         x86_blocks[label] = instrs
 
-    print(x86_blocks)
     return x86.X86Program(x86_blocks)
 
 
@@ -340,11 +342,13 @@ def allocate_registers(program: x86.X86Program) -> x86.X86Program:
                 return set()
             case x86.Reg(r):
                 return set()
-            case x86.Var(x):
+            case x86.ByteReg(r):
+                return set()
+            case Var(x):
                 all_vars.add(a)
                 return {a}
             case _:
-                raise Exception('ul_arg', a)
+                return set()
 
     def reads_of(i: x86.Instr) -> Set[x86.Var]:
         match i:
@@ -359,7 +363,10 @@ def allocate_registers(program: x86.X86Program) -> x86.X86Program:
                 else:
                     # go compute the live-before set, and save it in live_before_sets
                     ul_block(label)
-                    return live_before_sets[label]
+                    if label in live_before_sets:
+                        return live_before_sets[label]
+                    else:
+                        return set()
             case _:
                 return set()
 
@@ -382,16 +389,22 @@ def allocate_registers(program: x86.X86Program) -> x86.X86Program:
     # for that label from prog.blocks
     # save the live-after sets in the global dict
     # save the live-before set in the global dict
-    def ul_block(instrs: List[x86.Instr]) -> List[Set[x86.Var]]:
-        current_live_after: Set[x86.Var] = set()
+    def ul_block(label: str) -> List[Set[x86.Var]]:
+        if label in program.blocks:
+            instrs = program.blocks[label]
+            current_live_after: Set[x86.Var] = set()
 
-        live_after_sets = []
-        for i in reversed(instrs):
-            live_after_sets.append(current_live_after)
-            current_live_after = ul_instr(i, current_live_after)
+            curr_live_after_sets = []
+            for i in reversed(instrs):
+                curr_live_after_sets.append(current_live_after)
+                current_live_after = ul_instr(i, current_live_after)
 
-        live_before_sets[label] = current_live_after
-        return list(reversed(live_after_sets))
+            curr_live_after_sets.reverse()
+            live_after_sets[label] = curr_live_after_sets
+            live_before_sets[label] = current_live_after
+            return curr_live_after_sets
+        else :
+            return [];
 
     # --------------------------------------------------
     # interference graph
@@ -453,6 +466,8 @@ def allocate_registers(program: x86.X86Program) -> x86.X86Program:
                 return a
             case x86.Reg(r):
                 return a
+            case x86.ByteReg(r):
+                return a
             case x86.Var(x):
                 return homes[a]
             case _:
@@ -463,7 +478,7 @@ def allocate_registers(program: x86.X86Program) -> x86.X86Program:
             case x86.NamedInstr(i, args):
                 return x86.NamedInstr(i, [ah_arg(a) for a in args])
             case _:
-                if isinstance(e, (x86.Callq, x86.Retq, x86.Jmp)):
+                if isinstance(e, (x86.Callq, x86.Retq, x86.Jmp, x86.Set)):
                     return e
                 else:
                     raise Exception('ah_instr', e)
@@ -518,8 +533,10 @@ def allocate_registers(program: x86.X86Program) -> x86.X86Program:
 
     # Step 5: replace variables with their homes
     blocks = program.blocks
-    new_blocks = {label: ah_block(block) for label, block in blocks.items()}
-    return x86.X86Program(new_blocks, stack_space = align(8 * stack_locations_used))
+    #new_blocks = {label: ah_block(block) for label, block in blocks.items()}
+    #print(x86.X86Program(new_blocks, stack_space = align(8 * stack_locations_used)))
+    #return x86.X86Program(new_blocks, stack_space = align(8 * stack_locations_used))
+    return x86.X86Program(blocks)
 
 
 ##################################################
@@ -557,7 +574,7 @@ def patch_instructions(program: x86.X86Program) -> x86.X86Program:
                 return [x86.NamedInstr('movq', [e.args[0], x86.Reg('rax')]),
                         x86.NamedInstr('addq', [x86.Reg('rax'), e.args[1]])]
             case _:
-                if isinstance(e, (x86.Callq, x86.Retq, x86.Jmp, x86.NamedInstr)):
+                if isinstance(e, (x86.Callq, x86.Retq, x86.Jmp, x86.NamedInstr, x86.Set)):
                     return [e]
                 else:
                     raise Exception('pi_instr', e)
@@ -569,6 +586,7 @@ def patch_instructions(program: x86.X86Program) -> x86.X86Program:
 
     blocks = program.blocks
     new_blocks = {label: pi_block(block) for label, block in blocks.items()}
+    print(new_blocks)
     return x86.X86Program(new_blocks, stack_space = program.stack_space)
 
 
