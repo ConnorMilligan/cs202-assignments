@@ -291,11 +291,11 @@ def explicate_control(prog: Program) -> cif.CProgram:
 
                 return [cif.Goto(test_label)]
             case _:
-                raise RuntimeError(stmt)
+                return [explicate_atm(stmt)]
+                #raise RuntimeError(stmt)
 
     def explicate_stmts(stmts: List[Stmt], cont: List[cif.Stmt]) -> List[cif.Stmt]:
         for s in reversed(stmts):
-            print(s)
             cont = explicate_stmt(s, cont)
         return cont
 
@@ -303,7 +303,6 @@ def explicate_control(prog: Program) -> cif.CProgram:
     new_body = explicate_stmts(prog.stmts, new_body)
 
     basic_blocks['start'] = new_body
-    print(cif.CProgram(basic_blocks))
     return cif.CProgram(basic_blocks)
 
 
@@ -378,7 +377,8 @@ def select_instructions(prog: cif.CProgram) -> x86.X86Program:
                         x86.JmpIf('e', then_label),
                         x86.Jmp(else_label)]
             case _:
-                raise Exception('si_stmt', stmt)
+                return [si_atm(stmt)]
+                #raise Exception('si_stmt', stmt)
 
     basic_blocks = {label: si_stmts(block) for (label, block) in prog.blocks.items()}
     return x86.X86Program(basic_blocks)
@@ -411,8 +411,10 @@ def allocate_registers(program: x86.X86Program) -> x86.X86Program:
     """
 
     all_vars: Set[x86.Var] = set()
-    for label in blocks:
+    live_before_sets = {}
+    for label in program.blocks:
         live_before_sets[label] = set()
+    live_before_sets['conclusion'] = set()
     live_after_sets = {}
     homes: Dict[x86.Var, x86.Arg] = {}
     blocks = program.blocks
@@ -445,7 +447,7 @@ def allocate_registers(program: x86.X86Program) -> x86.X86Program:
                 # are the live-before variables of the destination block
                 return live_before_sets[label]
             case _:
-                if isinstance(i, (x86.Callq, x86.Set)):
+                if isinstance(i, (x86.Callq, x86.Set, x86.Var)):
                     return set()
                 else:
                     raise Exception(i)
@@ -456,7 +458,7 @@ def allocate_registers(program: x86.X86Program) -> x86.X86Program:
                 if i in ['movq', 'movzbq', 'addq', 'subq', 'imulq', 'cmpq', 'andq', 'orq', 'xorq']:
                 return vars_arg(e2)
             case _:
-                if isinstance(i, (x86.Jmp, x86.JmpIf, x86.Callq, x86.Set)):
+                if isinstance(i, (x86.Jmp, x86.JmpIf, x86.Callq, x86.Set, x86.Var)):
                     return set()
                 else:
                     raise Exception(i)
@@ -480,7 +482,12 @@ def allocate_registers(program: x86.X86Program) -> x86.X86Program:
         live_after_sets[label] = list(reversed(block_live_after_sets))
 
     def ul_fixpoint(labels: List[str]):
-        pass
+        while True:
+            old_live_after_sets = live_after_sets.copy()
+            for label in labels:
+                ul_block(label)
+            if old_live_after_sets == live_after_sets:
+                break
 
     # --------------------------------------------------
     # interference graph
@@ -554,7 +561,7 @@ def allocate_registers(program: x86.X86Program) -> x86.X86Program:
             case x86.Set(cc, a1):
                 return x86.Set(cc, ah_arg(a1))
             case _:
-                if isinstance(e, (x86.Callq, x86.Retq, x86.Jmp, x86.JmpIf)):
+                if isinstance(e, (x86.Callq, x86.Retq, x86.Jmp, x86.JmpIf, x86.Var)):
                     return e
                 else:
                     raise Exception('ah_instr', e)
@@ -568,7 +575,7 @@ def allocate_registers(program: x86.X86Program) -> x86.X86Program:
 
     # Step 1: Perform liveness analysis
     #ul_block('start')
-    ul_fixpoint(List(blocks.keys()))
+    ul_fixpoint(list(blocks.keys()))
     log_ast('live-after sets', live_after_sets)
 
     # Step 2: Build the interference graph
@@ -642,7 +649,7 @@ def patch_instructions(program: x86.X86Program) -> x86.X86Program:
                 return [x86.NamedInstr('movq', [x86.Immediate(i), x86.Reg('rax')]),
                         x86.NamedInstr('cmpq', [a1, x86.Reg('rax')])]
             case _:
-                if isinstance(e, (x86.Callq, x86.Retq, x86.Jmp, x86.JmpIf, x86.NamedInstr, x86.Set)):
+                if isinstance(e, (x86.Callq, x86.Retq, x86.Jmp, x86.JmpIf, x86.NamedInstr, x86.Set, x86.Var)):
                     return [e]
                 else:
                     raise Exception('pi_instr', e)
