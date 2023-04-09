@@ -58,11 +58,94 @@ TEnv = Dict[str, type]
 def typecheck(program: Program) -> Program:
     """
     Typechecks the input program; throws an error if the program is not well-typed.
-    :param program: The Ltup program to typecheck
+    :param program: The Lif program to typecheck
     :return: The program, if it is well-typed
     """
 
-    pass
+    prim_arg_types = {
+        'add':   [int, int],
+        'sub':   [int, int],
+        'mult':  [int, int],
+        'not': [bool],
+        'or':  [bool, bool],
+        'and':  [bool, bool],
+        'gt':   [int, int],
+        'gte':  [int, int],
+        'lt':   [int, int],
+        'lte':  [int, int],
+    }
+
+    prim_output_types = {
+        'add':   int,
+        'sub':   int,
+        'mult':  int,
+        'not': bool,
+        'or':  bool,
+        'and':  bool,
+        'gt':   bool,
+        'gte':  bool,
+        'lt':   bool,
+        'lte':  bool,
+    }
+
+
+    def tc_exp(e: Expr, env: TEnv) -> type:
+        match e:
+            case Var(x):
+                t = env[x]
+                if isinstance(t, tuple):
+                    tuple_var_types[x] = t
+                return env[x]
+            case Constant(i):
+                if isinstance(i, bool):
+                    return bool
+                elif isinstance(i, int):
+                    return int
+                else:
+                    raise Exception('tc_exp', e)
+            case Prim('subscript', [e1, Constant(idx)]):
+                # TODO
+                pass
+            case Prim('tuple', args):
+                types = [tc_exp(a, env) for a in args]
+                return tuple(types)
+            case Prim('eq', [e1, e2]):
+                assert tc_exp(e1, env) == tc_exp(e2, env)
+                return bool
+            case Prim(op, args):
+                arg_types = [tc_exp(a, env) for a in args]
+                assert arg_types == prim_arg_types[op]
+                return prim_output_types[op]
+            case _:
+                raise Exception('tc_exp', e)
+
+    def tc_stmt(s: Stmt, env: TEnv):
+        match s:
+            case While(condition, body_stmts):
+                assert tc_exp(condition, env) == bool
+                tc_stmts(body_stmts, env)
+            case If(condition, then_stmts, else_stmts):
+                assert tc_exp(condition, env) == bool
+                tc_stmts(then_stmts, env)
+                tc_stmts(else_stmts, env)
+            case Print(e):
+                tc_exp(e, env)
+            case Assign(x, e):
+                t_e = tc_exp(e, env)
+                if x in env:
+                    assert t_e == env[x]
+                else:
+                    env[x] = t_e
+            case _:
+                raise Exception('tc_stmt', s)
+
+    def tc_stmts(stmts: List[Stmt], env: TEnv):
+        for s in stmts:
+            tc_stmt(s, env)
+
+    env = {}
+    tc_stmts(program.stmts, env)
+    return program
 
 
 ##################################################
@@ -104,7 +187,62 @@ def expose_alloc(prog: Program) -> Program:
     :return: An Ltup program, without Tuple constructors
     """
 
-    pass
+    def mk_tag(ts):
+        tag = 0
+        # 1. construct pointer mask
+        for t in reversed(ts):
+            tag = tag << 1
+            if isinstance(t, tuple):
+                tag = tag + 1
+            else:
+                tag = tag + 0
+
+        # 2. construct length
+        tag = tag << 6
+        tag = tag + len(ts)
+
+        # 3. add the forwarding pointer indicator
+        tag = tag << 1
+        tag = tag + 1
+
+        return (tag)
+
+    # every tuple contruction will be a statement of the form
+    #x = tuple(args)
+
+    def ea_stmt(s: Stmt) -> List[Stmt]:
+        match s:
+            case Assign(x, Prim('tuple', args)):
+                all_stmts = []
+                bytes_needed = len(args) * 8 + 8
+                tmp1_vars = gensym("tmp")
+
+                tmp1 = Assign("tmp_2", Prim("add", [Var("free_ptr"), Constant(bytes_needed)]))
+                tmp2 = Assign("tmp_3", Prim("lt", [Var("tmp_2"), Var("fromespace_end")]))
+                collect_if = If(Var("tmp_3"), [], [Assign("_", Prim("collect", [Constant(bytes_needed)]))])
+                all_stmts += [tmp1, tmp2, collect_if]
+
+                # 2. Allocate
+                # TODO
+                tag = mk_tag(tuple_var_types[x])
+
+                # 3. set contents
+                # TODO
+                for i, a in enumerate(args):
+                    all_stmts.append(Assign("_", Prim('tuple_set', [Var(x), Constant(i), a])))
+
+                return all_stmts
+            case While(Begin(c_stmts, c_expr), body_stmts):
+                return [While(Begin(ea_stmts(c_stmts), c_expr), ea_stmts(body_stmts))]
+            case If(e, s1, s2):
+                return [If(e, ea_stmts(s1), ea_stmts(s2))]
+            case _:
+                return [s]
+    def ea_stmts(stmts: List[Stmt]) -> List[Stmt]:
+        pass
+
+
+    return Program(ea_stmts(prog.stmts))
 
 
 ##################################################
@@ -147,7 +285,64 @@ def select_instructions(prog: ctup.CProgram) -> x86.X86Program:
     :return: a pseudo-x86 program
     """
 
-    pass
+    def si_atm(a: cif.Expr) -> x86.Arg:
+        match a:
+            case cif.Constant(i):
+                return x86.Immediate(int(i))
+            case cif.Var(x):
+                return x86.Var(x)
+            case _:
+                raise Exception('si_atm', a)
+
+    def si_stmts(stmts: List[cif.Stmt]) -> List[x86.Instr]:
+        instrs = []
+
+        for stmt in stmts:
+            instrs.extend(si_stmt(stmt))
+
+        return instrs
+
+    op_cc = {'eq': 'e', 'gt': 'g', 'gte': 'ge', 'lt': 'l', 'lte': 'le'}
+
+    binop_instrs = {'add': 'addq', 'sub': 'subq', 'mult': 'imulq', 'and': 'andq', 'or': 'orq'}
+
+    def si_stmt(stmt: cif.Stmt) -> List[x86.Instr]:
+        match stmt:
+            # TODO add cases for tuple subscipt, tuple
+            case cif.Assign(x, cif.Prim(op, [atm1, atm2])):
+                if op in binop_instrs:
+                    return [x86.NamedInstr('movq', [si_atm(atm1), x86.Reg('rax')]),
+                            x86.NamedInstr(binop_instrs[op], [si_atm(atm2), x86.Reg('rax')]),
+                            x86.NamedInstr('movq', [x86.Reg('rax'), x86.Var(x)])]
+                elif op in op_cc:
+                    return [x86.NamedInstr('cmpq', [si_atm(atm2), si_atm(atm1)]),
+                            x86.Set(op_cc[op], x86.ByteReg('al')),
+                            x86.NamedInstr('movzbq', [x86.ByteReg('al'), x86.Var(x)])]
+
+                else:
+                    raise Exception('si_stmt failed op', op)
+            case cif.Assign(x, cif.Prim('not', [atm1])):
+                return [x86.NamedInstr('movq', [si_atm(atm1), x86.Var(x)]),
+                        x86.NamedInstr('xorq', [x86.Immediate(1), x86.Var(x)])]
+            case cif.Assign(x, atm1):
+                return [x86.NamedInstr('movq', [si_atm(atm1), x86.Var(x)])]
+            case cif.Print(atm1):
+                return [x86.NamedInstr('movq', [si_atm(atm1), x86.Reg('rdi')]),
+                        x86.Callq('print_int')]
+            case cif.Return(atm1):
+                return [x86.NamedInstr('movq', [si_atm(atm1), x86.Reg('rax')]),
+                        x86.Jmp('conclusion')]
+            case cif.Goto(label):
+                return [x86.Jmp(label)]
+            case cif.If(a, cif.Goto(then_label), cif.Goto(else_label)):
+                return [x86.NamedInstr('cmpq', [si_atm(a), x86.Immediate(1)]),
+                        x86.JmpIf('e', then_label),
+                        x86.Jmp(else_label)]
+            case _:
+                raise Exception('si_stmt', stmt)
+
+    basic_blocks = {label: si_stmts(block) for (label, block) in prog.blocks.items()}
+    return x86.X86Program(basic_blocks)
 
 
 ##################################################
