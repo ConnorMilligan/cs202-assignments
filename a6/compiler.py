@@ -448,8 +448,7 @@ def select_instructions(prog: ctup.CProgram) -> x86.X86Program:
                         return [x86.NamedInstr('movq', [x86.GlobalVal('free_ptr'), x86.Var(x)]),
                                 x86.NamedInstr('addq', [si_atm(atm1), x86.GlobalVal('free_ptr')]),
                                 x86.NamedInstr('movq', [x86.Var(x), x86.Reg('r11')]),
-                                x86.NamedInstr('movq', [si_atm(atm2),
-                                x86.NamedInstr('deref', [x86.Reg('r11'), x86.Immediate(0)])])]
+                                x86.NamedInstr('movq', [si_atm(atm2), x86.Deref('r11', 0)])]
                     elif op == 'subscript':
                         return [x86.NamedInstr('movq', [si_atm(atm1), x86.Reg('r11')]),
                                 x86.NamedInstr('movq', [x86.Deref('r11', 0), x86.Var(x)])]
@@ -534,6 +533,10 @@ def allocate_registers(program: x86.X86Program) -> x86.X86Program:
             case x86.Var(x):
                 all_vars.add(x86.Var(x))
                 return {x86.Var(x)}
+            case x86.Deref(r):
+                return set()
+            case x86.GlobalVal(x):
+                return set()
             case _:
                 raise Exception('ul_arg', a)
 
@@ -656,6 +659,10 @@ def allocate_registers(program: x86.X86Program) -> x86.X86Program:
                 return a
             case x86.Var(x):
                 return homes[x86.Var(x)]
+            case x86.GlobalVal(x):
+                return a
+            case x86.Deref(r, o):
+                return a
             case _:
                 raise Exception('ah_arg', a)
 
@@ -666,7 +673,7 @@ def allocate_registers(program: x86.X86Program) -> x86.X86Program:
             case x86.Set(cc, a1):
                 return x86.Set(cc, ah_arg(a1))
             case _:
-                if isinstance(e, (x86.Callq, x86.Retq, x86.Jmp, x86.JmpIf)):
+                if isinstance(e, (x86.Callq, x86.Retq, x86.Jmp, x86.JmpIf, x86.GlobalVal)):
                     return e
                 else:
                     raise Exception('ah_instr', e)
@@ -791,6 +798,10 @@ def prelude_and_conclusion(program: x86.X86Program) -> x86.X86Program:
                x86.NamedInstr('movq',  [x86.Reg('rsp'), x86.Reg('rbp')]),
                x86.NamedInstr('subq',  [x86.Immediate(program.stack_space),
                                         x86.Reg('rsp')]),
+               x86.NamedInstr('movq', [x86.Immediate(16384), x86.Reg('rdi')]),
+               x86.NamedInstr('movq', [x86.Immediate(16), x86.Reg('rsi')]),
+               x86.Callq('initialize'),
+               x86.NamedInstr('movq', [x86.GlobalVal("rootstack_begin"), x86.Reg("r15")]),
                x86.Jmp('start')]
 
     conclusion = [x86.NamedInstr('addq', [x86.Immediate(program.stack_space),
